@@ -84,21 +84,6 @@ class USBManager: ObservableObject {
         var id: String { rawValue }
     }
 
-    // MARK: - レイアウトプリセット
-
-    /// キャプチャしたコマンドシーケンスによるレイアウトプリセット
-    ///
-    /// レイアウト変更は~50+コマンドのシーケンスが必要なため、
-    /// キャプチャしたデータをリプレイする方式を採用。
-    /// 各コマンドはシーケンス番号(2B)とチェックサム(2B)を除いたペイロード部分。
-    struct LayoutPreset {
-        let name: String
-        let columns: Int
-        let rows: Int
-        let direction: ScanDirection
-        /// ペイロードのみ (55 AA [seq 2B]の後から、チェックサム前まで)
-        let commands: [[UInt8]]
-    }
 
     // MARK: - 接続管理
 
@@ -423,83 +408,138 @@ class USBManager: ObservableObject {
 
     // MARK: - 公開API: レイアウト設定
 
-    /// レイアウト設定を送信する（簡易版: 画面サイズのみ）
+    /// レイアウト設定のフルシーケンスを動的に生成して送信する
     ///
-    /// 注意: フルのレイアウト変更には~50+コマンドのシーケンスが必要。
-    /// 完全なレイアウト変更にはsendLayoutPreset()を使用すること。
+    /// キャプチャ解析により判明したコマンドシーケンス (42コマンド):
+    /// 1. 初期化 (cmd 0-1): 受信カード初期化
+    /// 2. グローバル設定 (cmd 2-13): 画面サイズ、列数等
+    /// 3. マッピングテーブル (cmd 14-29): 16ブロック×256バイト、カード→ピクセル座標マッピング
+    /// 4. パーカード設定 (cmd 30-38): 各受信カードのサイズ設定
+    /// 5. コミット (cmd 39-41): 設定適用
     func setLayout(columns: Int, rows: Int, cabinetWidth: Int, cabinetHeight: Int, enabled: Set<CabinetPosition>) {
         let totalWidth = columns * cabinetWidth
         let totalHeight = rows * cabinetHeight
+        let totalCards = columns * rows
 
-        let widthBytes = withUnsafeBytes(of: UInt16(totalWidth).littleEndian) { Array($0) }
-        let widthPacket = buildPacket(
-            isWrite: true,
-            register: Register.screenWidth,
-            data: widthBytes,
-            dest: Packet.destSendingCard
-        )
-        sendRaw(widthPacket)
-
-        let heightBytes = withUnsafeBytes(of: UInt16(totalHeight).littleEndian) { Array($0) }
-        let heightPacket = buildPacket(
-            isWrite: true,
-            register: Register.screenHeight,
-            data: heightBytes,
-            dest: Packet.destSendingCard
-        )
-        sendRaw(heightPacket)
-
-        print("[USBManager] setLayout: \(totalWidth)x\(totalHeight)px (\(columns)x\(rows) cabinets, \(enabled.count) enabled)")
-    }
-
-    /// レイアウトプリセットのコマンドシーケンスを送信する
-    ///
-    /// キャプチャで判明: レイアウト変更は~50+コマンドのシーケンスで構成:
-    /// - 全体設定コマンド群 (dest=0x00)
-    /// - 受信カード個別設定 (dest=0xFF)
-    /// - マッピングテーブル (16ブロック×276バイト)
-    ///
-    /// プリセットのコマンドはシーケンス番号とチェックサムを再計算して送信。
-    func sendLayoutPreset(_ preset: LayoutPreset) {
         serialQueue.async { [weak self] in
-            guard let self = self else { return }
-
-            print("[USBManager] Sending layout preset: \(preset.name) (\(preset.commands.count) commands)")
-
-            for (index, payload) in preset.commands.enumerated() {
-                let serial = self.nextSerial()
-
-                var packet: [UInt8] = [0x55, 0xAA]
-                packet.append(UInt8((serial >> 8) & 0xFF))
-                packet.append(UInt8(serial & 0xFF))
-                packet.append(contentsOf: payload)
-
-                // チェックサム再計算
-                let checksumBytes = Array(packet[2...])
-                let sum = checksumBytes.reduce(UInt32(0x5555)) { $0 + UInt32($1) }
-                packet.append(UInt8(sum & 0xFF))
-                packet.append(UInt8((sum >> 8) & 0xFF))
-
-                guard self.serialPort >= 0 else {
-                    print("[USBManager] Not connected, preset aborted at command \(index)")
-                    return
-                }
-
-                let written = write(self.serialPort, packet, packet.count)
-                if written < 0 {
-                    let err = String(cString: strerror(errno))
-                    print("[USBManager] Write error at command \(index): \(err)")
-                    return
-                }
-
-                // コマンド間に少し待機
-                if index < preset.commands.count - 1 {
-                    usleep(5000) // 5ms
-                }
+            guard let self = self, self.serialPort >= 0 else {
+                print("[USBManager] Not connected")
+                return
             }
 
-            print("[USBManager] Layout preset complete: \(preset.name)")
+            print("[USBManager] setLayout: \(columns)x\(rows) = \(totalWidth)x\(totalHeight)px, \(enabled.count)/\(totalCards) enabled")
+
+            let widthLE = self.uint16LE(UInt16(totalWidth))
+            let heightLE = self.uint16LE(UInt16(totalHeight))
+
+            // === Section 1: 初期化 (dest=0xFF 受信カード) ===
+            self.sendCmd(dest: 0xFF, port: 0x00, board: 0x0000, reg: 0x02000018, data: [0x00])
+            self.sendCmd(dest: 0xFF, port: 0x00, board: 0x0000, reg: 0x02000019, data: [0x00])
+
+            // === Section 2: グローバル設定 (dest=0x00 送信カード) ===
+            self.sendCmd(dest: 0x00, reg: 0x020000F0, data: [0x00])
+            self.sendCmd(dest: 0x00, reg: 0x02000028, data: [0x00, 0x00])  // offset X area1
+            self.sendCmd(dest: 0x00, reg: 0x0200002A, data: [0x00, 0x00])  // offset Y area1
+            self.sendCmd(dest: 0x00, reg: 0x02000024, data: widthLE)       // width area1
+            self.sendCmd(dest: 0x00, reg: 0x02000026, data: heightLE)      // height area1
+            self.sendCmd(dest: 0x00, reg: 0x0200002C, data: widthLE)       // width area2
+            self.sendCmd(dest: 0x00, reg: 0x02000055, data: [0x00, 0x00])  // offset X area3
+            self.sendCmd(dest: 0x00, reg: 0x02000057, data: [0x00, 0x00])  // offset Y area3
+            self.sendCmd(dest: 0x00, reg: 0x02000051, data: widthLE)       // width area3
+            self.sendCmd(dest: 0x00, reg: 0x02000053, data: heightLE)      // height area3
+            self.sendCmd(dest: 0x00, reg: 0x03100000, data: self.uint16LE(UInt16(columns)))  // column count
+            self.sendCmd(dest: 0x00, reg: 0x02000050, data: [0x00])
+
+            // === Section 3: マッピングテーブル (16ブロック) ===
+            let mappingBlock = self.buildMappingBlock(
+                columns: columns, rows: rows,
+                cabinetWidth: cabinetWidth, cabinetHeight: cabinetHeight
+            )
+            for blockIndex in 0..<16 {
+                let regAddr: UInt32 = 0x03000000 + UInt32(blockIndex) * 0x100
+                self.sendCmd(dest: 0x00, reg: regAddr, data: mappingBlock)
+            }
+
+            // === Section 4: パーカード設定 ===
+            // 全ボードリセット
+            self.sendCmd(dest: 0x00, port: 0x01, board: 0xFFFF, reg: 0x0200009A, data: [0x00])
+
+            // 各カードのサイズを設定 (有効なカードのみ)
+            let cardOrder = self.cardOrder(columns: columns, rows: rows, enabled: enabled)
+            for boardIndex in cardOrder {
+                let wLE = self.uint16LE(UInt16(cabinetWidth))
+                let hLE = self.uint16LE(UInt16(cabinetHeight))
+                self.sendCmd(dest: 0x00, port: 0x01, board: UInt16(boardIndex), reg: 0x02000017, data: wLE)
+                self.sendCmd(dest: 0x00, port: 0x01, board: UInt16(boardIndex), reg: 0x02000019, data: hLE)
+            }
+
+            // === Section 5: コミット ===
+            self.sendCmd(dest: 0xFF, port: 0x00, board: 0x0000, reg: 0x020000AE, data: [0x01])
+            self.sendCmd(dest: 0xFF, port: 0x01, board: 0xFFFF, reg: 0x01000012, data: [0xAA])
+            self.sendCmd(dest: 0x00, reg: 0x020001EC, data: self.uint16LE(UInt16(totalWidth)) + self.uint16LE(UInt16(totalHeight)))
+
+            print("[USBManager] Layout applied: \(totalWidth)x\(totalHeight)px")
         }
+    }
+
+    // MARK: - レイアウト ヘルパー
+
+    /// マッピングテーブルブロック (256バイト) を生成する
+    ///
+    /// キャプチャ解析結果:
+    /// - 各エントリは8バイト: [X座標 LE16] [0x00 0x00] [次のX LE16] [0x00 0x00]
+    /// - L→R: 0, cabinetWidth, 2*cabinetWidth, ...
+    /// - R→L: (cols-1)*cabinetWidth, (cols-2)*cabinetWidth, ...
+    /// - 256バイトに満たない場合は繰り返しパターンで埋める
+    private func buildMappingBlock(columns: Int, rows: Int, cabinetWidth: Int, cabinetHeight: Int) -> [UInt8] {
+        var block = [UInt8]()
+        let totalCards = columns * rows
+
+        // 各カードのX座標を左→右順に列挙
+        while block.count < 256 {
+            for cardIndex in 0..<max(1, totalCards) {
+                let col = cardIndex % columns
+                let x = col * cabinetWidth
+                let y = (cardIndex / columns) * cabinetHeight
+                block.append(contentsOf: uint16LE(UInt16(x)))
+                block.append(contentsOf: [0x00, 0x00])
+                block.append(contentsOf: uint16LE(UInt16(y)))
+                block.append(contentsOf: [0x00, 0x00])
+                if block.count >= 256 { break }
+            }
+        }
+
+        return Array(block.prefix(256))
+    }
+
+    /// 有効なカードのboard indexリストを返す
+    private func cardOrder(columns: Int, rows: Int, enabled: Set<CabinetPosition>) -> [Int] {
+        var order = [Int]()
+        for row in 0..<rows {
+            for col in 0..<columns {
+                let pos = CabinetPosition(row: row, col: col)
+                if enabled.contains(pos) {
+                    order.append(row * columns + col)
+                }
+            }
+        }
+        return order
+    }
+
+    /// UInt16をリトルエンディアンのバイト配列に変換
+    private func uint16LE(_ value: UInt16) -> [UInt8] {
+        return withUnsafeBytes(of: value.littleEndian) { Array($0) }
+    }
+
+    /// 1コマンドを構築して送信する (コマンド間5ms待機付き)
+    private func sendCmd(dest: UInt8 = 0x00, port: UInt8 = 0x00, board: UInt16 = 0x0000, reg: UInt32, data: [UInt8]) {
+        let packet = buildPacket(isWrite: true, register: reg, data: data, dest: dest, port: port, boardIndex: board)
+        let bytes = [UInt8](packet)
+        let written = write(self.serialPort, bytes, bytes.count)
+        if written < 0 {
+            print("[USBManager] Write error: \(String(cString: strerror(errno)))")
+        }
+        usleep(5000) // 5ms間隔
     }
 
     // MARK: - 公開API: 汎用レジスタアクセス
