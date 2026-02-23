@@ -41,6 +41,8 @@ class USBManager: ObservableObject {
     enum Register {
         /// 全体輝度 (0x00〜0xFF)
         static let globalBrightness: UInt32 = 0x02000001
+        /// RGB個別輝度 (4バイト: R, G, B, 0x00) ※ホワイトバランス用
+        static let rgbBrightness: UInt32 = 0x020001E3
         /// テストパターン (1=Off, 2=Red, 3=Green, 4=Blue, 5=White, 6=H-Lines, 7=V-Lines, 8=Slash, 9=Gray)
         static let testPattern: UInt32 = 0x02000101
         /// 画面幅（ポート単位）
@@ -56,7 +58,8 @@ class USBManager: ObservableObject {
         static let headerRead: [UInt8] = [0xAA, 0x55]
         static let sourcePC: UInt8 = 0xFE
         static let destDevice: UInt8 = 0x00
-        static let deviceTypeSendingCard: UInt8 = 0x00
+        static let deviceTypeReceivingCard: UInt8 = 0x01
+        static let defaultPort: UInt8 = 0xFF
         static let dirRead: UInt8 = 0x00
         static let dirWrite: UInt8 = 0x01
     }
@@ -244,7 +247,7 @@ class USBManager: ObservableObject {
     ///   - data: 書き込みデータ（読み取り時は空）
     ///   - port: ポート番号 (0-based)
     /// - Returns: 送信用パケット
-    private func buildPacket(isWrite: Bool, register: UInt32, data: [UInt8] = [], port: UInt8 = 0) -> Data {
+    private func buildPacket(isWrite: Bool, register: UInt32, data: [UInt8] = [], port: UInt8 = Packet.defaultPort) -> Data {
         let serial = nextSerial()
         let dataLength = UInt16(isWrite ? data.count : 0)
 
@@ -265,8 +268,8 @@ class USBManager: ObservableObject {
         // 送信先: デバイス (1 byte)
         packet.append(Packet.destDevice)
 
-        // デバイスタイプ: 送信カード (1 byte)
-        packet.append(Packet.deviceTypeSendingCard)
+        // デバイスタイプ: 受信カード (1 byte)
+        packet.append(Packet.deviceTypeReceivingCard)
 
         // ポートアドレス (1 byte)
         packet.append(port)
@@ -344,18 +347,32 @@ class USBManager: ObservableObject {
     // MARK: - 公開API
 
     /// 全体輝度を設定する (0〜100% → 0x00〜0xFF)
+    /// 実機プロトコル通り、全体輝度パケット + RGB輝度パケットの2つを送信する。
     /// - Parameter brightness: 輝度値 (0〜100)
-    func setBrightness(_ brightness: Int) {
+    /// - Parameter r: 赤チャンネル (0〜255, デフォルト0xF0)
+    /// - Parameter g: 緑チャンネル (0〜255, デフォルト0xF0)
+    /// - Parameter b: 青チャンネル (0〜255, デフォルト0xF0)
+    func setBrightness(_ brightness: Int, r: UInt8 = 0xF0, g: UInt8 = 0xF0, b: UInt8 = 0xF0) {
         let clamped = max(0, min(100, brightness))
         let value = UInt8(Double(clamped) / 100.0 * 255.0)
 
-        let packet = buildPacket(
+        // パケット1: 全体輝度 (レジスタ 0x02000001)
+        let brightnessPacket = buildPacket(
             isWrite: true,
             register: Register.globalBrightness,
             data: [value]
         )
-        sendRaw(packet)
-        print("[USBManager] setBrightness: \(clamped)% (0x\(String(format: "%02X", value)))")
+        sendRaw(brightnessPacket)
+
+        // パケット2: RGB個別輝度 (レジスタ 0x020001E3)
+        let rgbPacket = buildPacket(
+            isWrite: true,
+            register: Register.rgbBrightness,
+            data: [r, g, b, 0x00]
+        )
+        sendRaw(rgbPacket)
+
+        print("[USBManager] setBrightness: \(clamped)% (0x\(String(format: "%02X", value))), RGB=(\(r),\(g),\(b))")
     }
 
     /// 現在の輝度を読み取る
@@ -408,13 +425,13 @@ class USBManager: ObservableObject {
     }
 
     /// レジスタに任意の値を書き込む（上級者向け）
-    func writeRegister(_ register: UInt32, data: [UInt8], port: UInt8 = 0) {
+    func writeRegister(_ register: UInt32, data: [UInt8], port: UInt8 = Packet.defaultPort) {
         let packet = buildPacket(isWrite: true, register: register, data: data, port: port)
         sendRaw(packet)
     }
 
     /// レジスタの値を読み取る（上級者向け）
-    func readRegister(_ register: UInt32, port: UInt8 = 0) {
+    func readRegister(_ register: UInt32, port: UInt8 = Packet.defaultPort) {
         let packet = buildPacket(isWrite: false, register: register, port: port)
         sendRaw(packet)
     }
