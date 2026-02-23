@@ -67,19 +67,19 @@ struct ContentView: View {
 // MARK: - ConnectionStatusView
 
 struct ConnectionStatusView: View {
-    @State private var isConnected = false
+    @ObservedObject private var usbManager = USBManager.shared
 
     var body: some View {
         HStack(spacing: 8) {
             Circle()
-                .fill(isConnected ? Color.green : Color.orange)
+                .fill(usbManager.isConnected ? Color.green : Color.orange)
                 .frame(width: 8, height: 8)
 
             VStack(alignment: .leading, spacing: 1) {
-                Text(isConnected ? "MSD300 接続中" : "未接続")
+                Text(usbManager.isConnected ? "MSD300 接続中" : "未接続")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundColor(.white)
-                if isConnected {
+                if usbManager.isConnected {
                     Text("USB")
                         .font(.system(size: 9))
                         .foregroundColor(.white.opacity(0.5))
@@ -89,9 +89,13 @@ struct ConnectionStatusView: View {
             Spacer()
 
             Button(action: {
-                isConnected.toggle()
+                if usbManager.isConnected {
+                    usbManager.stopMonitoring()
+                } else {
+                    usbManager.startMonitoring()
+                }
             }) {
-                Image(systemName: isConnected ? "xmark.circle" : "arrow.clockwise")
+                Image(systemName: usbManager.isConnected ? "xmark.circle" : "arrow.clockwise")
                     .font(.system(size: 12))
                     .foregroundColor(.white.opacity(0.6))
             }

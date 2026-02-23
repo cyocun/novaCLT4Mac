@@ -133,7 +133,13 @@ struct LayoutView: View {
     }
 
     private func applyLayout() {
-        print("Apply layout: \(columns)x\(rows), enabled: \(enabledCabinets.count), resolution: \(totalResolution.width)x\(totalResolution.height)")
+        USBManager.shared.setLayout(
+            columns: columns,
+            rows: rows,
+            cabinetWidth: cabinetWidth,
+            cabinetHeight: cabinetHeight,
+            enabled: enabledCabinets
+        )
     }
 
     private func enableAll() {

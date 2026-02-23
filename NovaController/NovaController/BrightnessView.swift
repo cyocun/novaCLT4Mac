@@ -135,7 +135,7 @@ struct BrightnessView: View {
 
     private func applyBrightness() {
         lastApplied = brightness
-        print("Apply brightness: \(Int(brightness))%")
+        USBManager.shared.setBrightness(Int(brightness))
     }
 }
 
