@@ -15,8 +15,19 @@ struct LayoutView: View {
     @State private var cabinetWidth: Int = 128
     @State private var cabinetHeight: Int = 128
     @State private var selectedCabinet: CabinetPosition? = nil
-    @State private var enabledCabinets: Set<CabinetPosition> = []
+    @State private var enabledCabinets: Set<CabinetPosition> = Self.allCabinets(columns: 4, rows: 1)
     @State private var scanDirection: USBManager.ScanDirection = .leftToRight
+
+    /// 全キャビネットのSetを生成
+    private static func allCabinets(columns: Int, rows: Int) -> Set<CabinetPosition> {
+        var set = Set<CabinetPosition>()
+        for r in 0..<rows {
+            for c in 0..<columns {
+                set.insert(CabinetPosition(row: r, col: c))
+            }
+        }
+        return set
+    }
 
     var totalResolution: (width: Int, height: Int) {
         guard enabledCabinets.count > 0 else { return (0, 0) }
@@ -70,16 +81,29 @@ struct LayoutView: View {
                 }
 
                 // 適用ボタン
-                Button(action: applyLayout) {
-                    Text("レイアウトを適用")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundColor(.white)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
-                        .background(Color(hex: "#0f3460"))
-                        .cornerRadius(8)
+                HStack(spacing: 8) {
+                    Button(action: applyLayout) {
+                        Text("レイアウトを適用")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(.white)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                            .background(Color(hex: "#0f3460"))
+                            .cornerRadius(8)
+                    }
+                    .buttonStyle(.plain)
+
+                    Button(action: resetCards) {
+                        Text("リセット")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(.white)
+                            .padding(.vertical, 10)
+                            .padding(.horizontal, 16)
+                            .background(Color(hex: "#e94560"))
+                            .cornerRadius(8)
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
             }
             .padding(24)
             .frame(maxWidth: .infinity)
@@ -172,6 +196,8 @@ struct LayoutView: View {
             .frame(width: 200)
             .background(Color.white)
         }
+        .onChange(of: columns) { _ in enabledCabinets = Self.allCabinets(columns: columns, rows: rows) }
+        .onChange(of: rows) { _ in enabledCabinets = Self.allCabinets(columns: columns, rows: rows) }
     }
 
     private var scanDirectionIcon: String {
@@ -195,6 +221,15 @@ struct LayoutView: View {
             cabinetHeight: cabinetHeight,
             scanDirection: scanDirection,
             enabled: enabledCabinets
+        )
+    }
+
+    private func resetCards() {
+        USBManager.shared.resetReceivingCards(
+            columns: columns,
+            rows: rows,
+            cabinetWidth: cabinetWidth,
+            cabinetHeight: cabinetHeight
         )
     }
 

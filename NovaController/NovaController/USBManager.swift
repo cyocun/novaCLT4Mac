@@ -256,10 +256,15 @@ class USBManager: ObservableObject {
         data: [UInt8] = [],
         dest: UInt8 = Packet.destSendingCard,
         port: UInt8 = Packet.portAll,
-        boardIndex: UInt16 = 0xFFFF
+        boardIndex: UInt16 = 0xFFFF,
+        reserved: UInt8 = 0x00
     ) -> Data {
         let serial = nextSerial()
         let dataLength = UInt16(isWrite ? data.count : 0)
+
+        // デバイスタイプ: board=0x0000は送信カード(0x00)、それ以外は受信カード(0x01)
+        // キャプチャ検証済み: brightness(board=FFFF)→0x01, global(board=0000)→0x00
+        let deviceType: UInt8 = (boardIndex == 0x0000) ? 0x00 : Packet.deviceTypeReceivingCard
 
         var packet: [UInt8] = []
 
@@ -276,8 +281,8 @@ class USBManager: ObservableObject {
         // 送信先: 0x00=送信カード(MSD300), 0xFF=受信カード
         packet.append(dest)
 
-        // デバイスタイプ: 受信カード
-        packet.append(Packet.deviceTypeReceivingCard)
+        // デバイスタイプ: 0x00=送信カード, 0x01=受信カード (board値で自動判定)
+        packet.append(deviceType)
 
         // ポートアドレス
         packet.append(port)
@@ -290,7 +295,7 @@ class USBManager: ObservableObject {
         packet.append(isWrite ? Packet.dirWrite : Packet.dirRead)
 
         // 予約
-        packet.append(0x00)
+        packet.append(reserved)
 
         // レジスタアドレス (4 bytes, little-endian)
         packet.append(UInt8(register & 0xFF))
@@ -407,6 +412,30 @@ class USBManager: ObservableObject {
         print("[USBManager] setTestPattern: \(clamped)")
     }
 
+    // MARK: - 公開API: 受信カードリセット
+
+    /// 受信カードをリセットして既定のレイアウトを再適用する
+    ///
+    /// 不正なレイアウト設定でキャビネットが映らなくなった場合の復旧用。
+    /// 4×1 左→右の既定レイアウトを送信して受信カードの設定を上書きする。
+    func resetReceivingCards(columns: Int = 4, rows: Int = 1,
+                             cabinetWidth: Int = 128, cabinetHeight: Int = 128) {
+        let allEnabled: Set<CabinetPosition> = {
+            var set = Set<CabinetPosition>()
+            for r in 0..<rows {
+                for c in 0..<columns {
+                    set.insert(CabinetPosition(row: r, col: c))
+                }
+            }
+            return set
+        }()
+
+        print("[USBManager] Resetting receiving cards with \(columns)x\(rows) L→R layout")
+        setLayout(columns: columns, rows: rows,
+                  cabinetWidth: cabinetWidth, cabinetHeight: cabinetHeight,
+                  scanDirection: .leftToRight, enabled: allEnabled)
+    }
+
     // MARK: - 公開API: レイアウト設定
 
     /// レイアウト設定のフルシーケンスを動的に生成して送信する
@@ -477,9 +506,9 @@ class USBManager: ObservableObject {
                 self.sendCmd(dest: 0x00, port: 0x00, board: UInt16(boardIndex), reg: 0x02000019, data: hLE)
             }
 
-            // === Section 5: コミット ===
+            // === Section 5: コミット (キャプチャ検証済み) ===
             self.sendCmd(dest: 0xFF, port: 0x00, board: 0x0000, reg: 0x020000AE, data: [0x01])
-            self.sendCmd(dest: 0xFF, port: 0x01, board: 0xFFFF, reg: 0x01000012, data: [0xAA])
+            self.sendCmd(dest: 0xFF, port: 0xFF, board: 0xFFFF, reg: 0x01000012, data: [0xAA], reserved: 0x08)
             self.sendCmd(dest: 0x00, reg: 0x020001EC, data: self.uint16LE(UInt16(totalWidth)) + self.uint16LE(UInt16(totalHeight)))
 
             print("[USBManager] Layout applied: \(totalWidth)x\(totalHeight)px")
@@ -618,8 +647,8 @@ class USBManager: ObservableObject {
     }
 
     /// 1コマンドを構築して送信する (コマンド間5ms待機付き)
-    private func sendCmd(dest: UInt8 = 0x00, port: UInt8 = 0x00, board: UInt16 = 0x0000, reg: UInt32, data: [UInt8]) {
-        let packet = buildPacket(isWrite: true, register: reg, data: data, dest: dest, port: port, boardIndex: board)
+    private func sendCmd(dest: UInt8 = 0x00, port: UInt8 = 0x00, board: UInt16 = 0x0000, reg: UInt32, data: [UInt8], reserved: UInt8 = 0x00) {
+        let packet = buildPacket(isWrite: true, register: reg, data: data, dest: dest, port: port, boardIndex: board, reserved: reserved)
         let bytes = [UInt8](packet)
         let written = write(self.serialPort, bytes, bytes.count)
         if written < 0 {
