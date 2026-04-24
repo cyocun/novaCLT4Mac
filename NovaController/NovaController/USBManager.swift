@@ -29,6 +29,11 @@ class USBManager: ObservableObject {
     private var readSource: DispatchSourceRead?
     private var serialQueue = DispatchQueue(label: "com.novacontroller.serial", qos: .userInitiated)
     private var messageSerial: UInt16 = 0
+    private let serialLock = NSLock()
+
+    /// 応答待ちの continuation (シーケンス番号キー)
+    private var pendingReads: [UInt16: CheckedContinuation<Data?, Never>] = [:]
+    private let pendingLock = NSLock()
 
     // シリアルポート設定 (USBPcapキャプチャで確認済み)
     private let baudRate: speed_t = 115200
@@ -296,9 +301,10 @@ class USBManager: ObservableObject {
         boardIndex: UInt16 = 0xFFFF,
         reserved: UInt8 = 0x00,
         deviceType: UInt8? = nil,
-        lengthOverride: UInt16? = nil
+        lengthOverride: UInt16? = nil,
+        seq: UInt16? = nil
     ) -> Data {
-        let serial = nextSerial()
+        let serial = seq ?? nextSerial()
         // lengthOverride は「data は空だが len フィールドは非0」のような読み取り要求用
         let dataLength = lengthOverride ?? UInt16(isWrite ? data.count : 0)
 
@@ -364,8 +370,10 @@ class USBManager: ObservableObject {
         return Data(packet)
     }
 
-    /// メッセージシーケンス番号をインクリメント
+    /// メッセージシーケンス番号をインクリメント (スレッドセーフ)
     private func nextSerial() -> UInt16 {
+        serialLock.lock()
+        defer { serialLock.unlock() }
         messageSerial &+= 1
         return messageSerial
     }
@@ -401,7 +409,16 @@ class USBManager: ObservableObject {
         let reg = UInt32(bytes[12]) | (UInt32(bytes[13]) << 8) | (UInt32(bytes[14]) << 16) | (UInt32(bytes[15]) << 24)
         let len = Int(bytes[16]) | (Int(bytes[17]) << 8)
         let payloadEnd = min(18 + len, bytes.count - 2)
-        let payload = Array(bytes[18..<payloadEnd])
+        let payload = Data(bytes[18..<payloadEnd])
+
+        // 非同期読み取りを待っている呼び出しがあれば resume
+        pendingLock.lock()
+        let waiter = pendingReads.removeValue(forKey: seq)
+        pendingLock.unlock()
+        if let cont = waiter {
+            cont.resume(returning: payload)
+            return
+        }
 
         if reg == Register.globalBrightness, let raw = payload.first {
             let percent = Int((Double(raw) / 255.0 * 100.0).rounded())
@@ -703,10 +720,75 @@ class USBManager: ObservableObject {
         sendRaw(packet)
     }
 
-    /// レジスタの値を読み取る
+    /// レジスタの値を読み取る (fire-and-forget, 応答はログのみ)
     func readRegister(_ register: UInt32, dest: UInt8 = Packet.destSendingCard, port: UInt8 = Packet.portAll) {
         let packet = buildPacket(isWrite: false, register: register, dest: dest, port: port)
         sendRaw(packet)
+    }
+
+    /// レジスタから length バイトの値を非同期で読み取る
+    ///
+    /// 送信時のシーケンス番号をキーに応答を待機する。timeout 経過で nil を返す。
+    func readRegister(_ register: UInt32,
+                      length: UInt16,
+                      dest: UInt8 = Packet.destReceivingCard,
+                      port: UInt8 = Packet.portAll,
+                      board: UInt16 = 0,
+                      deviceType: UInt8? = nil,
+                      timeout: TimeInterval = 1.5) async -> Data? {
+        guard serialPort >= 0 else { return nil }
+        let seq = nextSerial()
+        let packet = buildPacket(isWrite: false, register: register,
+                                 dest: dest, port: port,
+                                 boardIndex: board,
+                                 deviceType: deviceType,
+                                 lengthOverride: length,
+                                 seq: seq)
+
+        let result = await withCheckedContinuation { (cont: CheckedContinuation<Data?, Never>) in
+            pendingLock.lock()
+            pendingReads[seq] = cont
+            pendingLock.unlock()
+
+            sendRaw(packet)
+
+            // タイムアウト監視
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { [weak self] in
+                guard let self = self else { return }
+                self.pendingLock.lock()
+                let waiting = self.pendingReads.removeValue(forKey: seq)
+                self.pendingLock.unlock()
+                waiting?.resume(returning: nil)
+            }
+        }
+        return result
+    }
+
+    // MARK: - 公開API: 受信カードヘルス取得
+    //
+    // Portions adapted from @novastar/screen (sarakusha/novastar)
+    // Copyright (c) 2019 Andrei Sarakeev — MIT License
+
+    /// 受信カード監視データの読み取り先レジスタ (Scanner_AllMonitorDataAddr)
+    private static let cardHealthRegister: UInt32 = 0x0A000000
+    /// 監視データの総バイト数 (Scanner_AllMonitorDataOccupancy)
+    private static let cardHealthLength: UInt16 = 82
+
+    /// 指定ボードの受信カードから健康状態を読み取る
+    ///
+    /// - Parameters:
+    ///   - boardIndex: 受信カードのインデックス (0..<cardCount)
+    ///   - port: ポートアドレス (既定 0xFF = 全ポート)
+    func readCardHealth(boardIndex: UInt16, port: UInt8 = Packet.portAll) async -> CardHealth? {
+        guard let data = await readRegister(Self.cardHealthRegister,
+                                            length: Self.cardHealthLength,
+                                            dest: Packet.destReceivingCard,
+                                            port: port,
+                                            board: boardIndex,
+                                            deviceType: Packet.deviceTypeReceivingCard) else {
+            return nil
+        }
+        return CardHealth.parse(data)
     }
 
     // MARK: - 低レベル送信
@@ -732,5 +814,105 @@ class USBManager: ObservableObject {
                 print("[USBManager] Sent \(written) bytes: \(bytes.map { String(format: "%02X", $0) }.joined(separator: " "))")
             }
         }
+    }
+}
+
+// MARK: - CardHealth
+//
+// 受信カードの健康状態 (温度 / 湿度 / 電圧 / ファン / モジュールエラー)。
+// Scanner_AllMonitorDataAddr (0x0A000000) から 82 バイトの応答をパースする。
+//
+// Portions adapted from @novastar/screen HWStatus.ts (sarakusha/novastar)
+// Copyright (c) 2019 Andrei Sarakeev — MIT License
+
+struct CardHealth {
+    struct TempReading {
+        let isValid: Bool
+        let celsius: Double
+    }
+    struct ValueReading {
+        let isValid: Bool
+        let value: Int
+    }
+    struct VoltageReading {
+        let isValid: Bool
+        let volts: Double
+    }
+    struct FanReading {
+        let isValid: Bool
+        let rpm: Int
+    }
+
+    let scanCardTemp: TempReading           // offset 0 (2B)
+    let scanCardHumidity: ValueReading      // offset 2 (1B)
+    let scanCardVoltage: VoltageReading     // offset 3 (1B)
+    let moduleStatusLow: Data               // offset 11 (16B)
+    let isMonitorCardConnected: Bool        // offset 32 (1B)
+    let monitorCardTemp: TempReading        // offset 39 (2B)
+    let monitorCardHumidity: ValueReading   // offset 41 (1B)
+    let monitorCardSmoke: ValueReading      // offset 42 (1B)
+    let monitorCardFans: [FanReading]       // offset 43 (4B)
+    let monitorCardVoltages: [VoltageReading] // offset 47 (9B)
+    let analogInput: Data                   // offset 56 (8B)
+    let generalStatus: UInt8                // offset 65
+    let moduleStatusHigh: Data              // offset 66 (16B)
+
+    /// 異常モジュールのフラグが 1 つでも立っていれば true
+    var hasModuleError: Bool {
+        return moduleStatusLow.contains(where: { $0 != 0 })
+            || moduleStatusHigh.contains(where: { $0 != 0 })
+    }
+
+    /// 82 バイトの応答 payload を CardHealth にパースする
+    static func parse(_ data: Data) -> CardHealth? {
+        guard data.count >= 82 else { return nil }
+        let b = [UInt8](data)
+
+        // ビット解釈は sarakusha/novastar HWStatus.ts の struct 定義を忠実に移植。
+        // 温度: byte[0] bit0=IsValid, (byte[0] & 0x7f)==1 のとき負符号、byte[1] が value×0.5℃
+        func tempInfo(_ o: Int) -> TempReading {
+            let flags = b[o]
+            let value = b[o + 1]
+            let isValid = (flags & 0x01) == 1
+            let sign: Double = ((flags & 0x7f) == 1) ? -0.5 : 0.5
+            return TempReading(isValid: isValid, celsius: sign * Double(value))
+        }
+        // 1バイト: bit0=IsValid, bit1-7=Value
+        func valueInfo(_ o: Int) -> ValueReading {
+            let byte = b[o]
+            return ValueReading(isValid: (byte & 0x01) == 1,
+                                value: Int((byte >> 1) & 0x7f))
+        }
+        // 1バイト: bit0=IsValid, value = (byte & 0x7f) / 10 [V]
+        func voltageInfo(_ o: Int) -> VoltageReading {
+            let byte = b[o]
+            return VoltageReading(isValid: (byte & 0x01) == 1,
+                                  volts: Double(byte & 0x7f) / 10.0)
+        }
+        // 1バイト: bit0=IsValid, value = (byte & 0x7f) * 50 [RPM]
+        func fanInfo(_ o: Int) -> FanReading {
+            let byte = b[o]
+            return FanReading(isValid: (byte & 0x01) == 1,
+                              rpm: Int(byte & 0x7f) * 50)
+        }
+
+        let fans = (0..<4).map { fanInfo(43 + $0) }
+        let voltages = (0..<9).map { voltageInfo(47 + $0) }
+
+        return CardHealth(
+            scanCardTemp: tempInfo(0),
+            scanCardHumidity: valueInfo(2),
+            scanCardVoltage: voltageInfo(3),
+            moduleStatusLow: Data(b[11..<27]),
+            isMonitorCardConnected: b[32] != 0,
+            monitorCardTemp: tempInfo(39),
+            monitorCardHumidity: valueInfo(41),
+            monitorCardSmoke: valueInfo(42),
+            monitorCardFans: fans,
+            monitorCardVoltages: voltages,
+            analogInput: Data(b[56..<64]),
+            generalStatus: b[65],
+            moduleStatusHigh: Data(b[66..<82])
+        )
     }
 }

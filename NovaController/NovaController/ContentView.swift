@@ -5,7 +5,7 @@ struct ContentView: View {
     @ObservedObject private var usbManager = USBManager.shared
 
     enum Tab {
-        case layout, brightness
+        case layout, brightness, health
     }
 
     var body: some View {
@@ -20,6 +20,8 @@ struct ContentView: View {
                         LayoutView()
                     case .brightness:
                         BrightnessView()
+                    case .health:
+                        HealthView()
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -70,11 +72,14 @@ struct Sidebar: View {
 
             // ナビゲーション
             VStack(spacing: 2) {
+                NavItem(icon: "sun.max", title: "輝度調整", isSelected: selectedTab == .brightness) {
+                    selectedTab = .brightness
+                }
                 NavItem(icon: "square.grid.3x3", title: "レイアウト", isSelected: selectedTab == .layout) {
                     selectedTab = .layout
                 }
-                NavItem(icon: "sun.max", title: "輝度調整", isSelected: selectedTab == .brightness) {
-                    selectedTab = .brightness
+                NavItem(icon: "waveform.path.ecg", title: "監視", isSelected: selectedTab == .health) {
+                    selectedTab = .health
                 }
             }
             .padding(.top, 12)

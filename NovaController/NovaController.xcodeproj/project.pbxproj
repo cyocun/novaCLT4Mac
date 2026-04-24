@@ -14,6 +14,7 @@
 		A10005 /* Extensions.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20005 /* Extensions.swift */; };
 		A10006 /* USBManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20006 /* USBManager.swift */; };
 		A10007 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A20007 /* Assets.xcassets */; };
+		A10008 /* HealthView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20008 /* HealthView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -24,6 +25,7 @@
 		A20005 /* Extensions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Extensions.swift; sourceTree = "<group>"; };
 		A20006 /* USBManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = USBManager.swift; sourceTree = "<group>"; };
 		A20007 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		A20008 /* HealthView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthView.swift; sourceTree = "<group>"; };
 		A30001 /* NovaController.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = NovaController.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -55,6 +57,7 @@
 				A20004 /* BrightnessView.swift */,
 				A20005 /* Extensions.swift */,
 				A20006 /* USBManager.swift */,
+				A20008 /* HealthView.swift */,
 				A20007 /* Assets.xcassets */,
 			);
 			path = NovaController;
@@ -143,6 +146,7 @@
 				A10004 /* BrightnessView.swift in Sources */,
 				A10005 /* Extensions.swift in Sources */,
 				A10006 /* USBManager.swift in Sources */,
+				A10008 /* HealthView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
