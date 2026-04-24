@@ -55,8 +55,55 @@ xcodebuild -project "$PROJECT" \
 APP_PATH="$BUILD_DIR/DerivedData/Build/Products/Release/${APP_NAME}.app"
 ZIP_PATH="$BUILD_DIR/$ZIP_NAME"
 
+# 安全削除ヘルパ: macOS 標準の trash コマンドを優先、なければ rm
+safe_delete() {
+    for target in "$@"; do
+        [ -e "$target" ] || continue
+        if command -v trash >/dev/null 2>&1; then
+            trash "$target" >/dev/null 2>&1 || rm -f "$target"
+        else
+            rm -f "$target"
+        fi
+    done
+}
+
+echo "==> Re-signing Sparkle.framework (ad-hoc)"
+# ad-hoc 署名 (Team ID 空) ではビルド時のまま Sparkle.framework を残すと
+# dyld が "different Team IDs" でアプリの起動を拒否する。
+# 内側のバイナリから外側へ順に ad-hoc 再署名することで整合を取る。
+SPARKLE_FW="$APP_PATH/Contents/Frameworks/Sparkle.framework"
+if [ -d "$SPARKLE_FW" ]; then
+    VERSION_DIR="$SPARKLE_FW/Versions/B"
+
+    # XPC services (Installer.xpc / Downloader.xpc 等)
+    if [ -d "$VERSION_DIR/XPCServices" ]; then
+        for xpc in "$VERSION_DIR/XPCServices"/*.xpc; do
+            [ -d "$xpc" ] && codesign --force --sign - --timestamp=none "$xpc"
+        done
+    fi
+    # Autoupdate 実行ファイル
+    [ -e "$VERSION_DIR/Autoupdate" ] && codesign --force --sign - --timestamp=none "$VERSION_DIR/Autoupdate"
+    # Updater.app (サブアプリ)
+    [ -d "$VERSION_DIR/Updater.app" ] && codesign --force --sign - --timestamp=none "$VERSION_DIR/Updater.app"
+    # Framework 本体
+    codesign --force --sign - --timestamp=none "$SPARKLE_FW"
+fi
+
+# App 本体を再署名 (内部 framework が変わったので既存署名は無効)
+# 元の entitlements を保持するため、一度抽出してから適用する
+ENTITLEMENTS_PLIST="$(mktemp -t ent)-entitlements.plist"
+if codesign -d --entitlements "$ENTITLEMENTS_PLIST" --xml "$APP_PATH" 2>/dev/null && [ -s "$ENTITLEMENTS_PLIST" ]; then
+    codesign --force --sign - --timestamp=none --entitlements "$ENTITLEMENTS_PLIST" "$APP_PATH"
+else
+    codesign --force --sign - --timestamp=none "$APP_PATH"
+fi
+safe_delete "$ENTITLEMENTS_PLIST"
+
+# 署名の整合性を検証 (開発中の早期検出用)
+codesign --verify --deep --strict "$APP_PATH" && echo "==> Signature verified"
+
 echo "==> Packaging $ZIP_NAME"
-rm -f "$ZIP_PATH"
+safe_delete "$ZIP_PATH"
 ditto -c -k --keepParent "$APP_PATH" "$ZIP_PATH"
 
 echo "==> Signing update (EdDSA)"
@@ -66,7 +113,7 @@ echo "$SIGN_OUTPUT"
 # sign_update の出力: `sparkle:edSignature="..." length="..."`
 ED_SIGNATURE=$(echo "$SIGN_OUTPUT" | sed -n 's/.*sparkle:edSignature="\([^"]*\)".*/\1/p')
 ZIP_LENGTH=$(stat -f%z "$ZIP_PATH")
-PUB_DATE=$(LC_TIME=C date -u "+%a, %d %b %Y %H:%M:%S +0000")   # RFC 822, Sparkle 必須の英語ロケール
+PUB_DATE=$(LC_ALL=C date -u "+%a, %d %b %Y %H:%M:%S +0000")   # RFC 822, LC_ALL で LC_TIME を確実に上書き
 REPO_URL="https://github.com/cyocun/novaCLT4Mac"
 DOWNLOAD_URL="${REPO_URL}/releases/download/${TAG}/${ZIP_NAME}"
 

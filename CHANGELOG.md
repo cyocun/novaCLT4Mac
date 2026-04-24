@@ -3,6 +3,23 @@
 本ファイルに各リリースの変更点を記録する。
 バージョン番号は [Semantic Versioning](https://semver.org/) に準拠。
 
+## [0.1.3] - 2026-04-24
+
+### 修正
+- **起動クラッシュを修正**: v0.1.1 / v0.1.2 は ad-hoc 署名で
+  Sparkle.framework との Team ID が食い違い dyld に拒否されて
+  起動できなかった。`scripts/release.sh` で
+  Sparkle.framework と内部 XPC / Autoupdate / Updater.app を
+  階層的に ad-hoc 再署名し、その後アプリ本体も再署名するように修正。
+- `scripts/release.sh`: pubDate の ロケール強制を
+  `LC_TIME` から `LC_ALL` に変更 (macOS の LC_ALL=ja_JP.UTF-8 環境で
+  LC_TIME=C が上書きされて日本語化されていた問題を解消)。
+
+### 既知の問題
+- **v0.1.1 / v0.1.2 は起動不可** です。既にインストール済みの方は
+  自動アップデートが届かないので、本リリースの zip を手動で
+  ダウンロードして `/Applications/NovaController.app` を置き換えてください。
+
 ## [0.1.2] - 2026-04-24
 
 ### 追加
