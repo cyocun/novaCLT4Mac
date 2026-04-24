@@ -45,11 +45,16 @@ fi
 mkdir -p "$BUILD_DIR"
 
 echo "==> Release build ($TAG)"
+# Sparkle はバージョン比較に CFBundleVersion (CURRENT_PROJECT_VERSION) を使うため、
+# リリース毎に単調増加する値を与える必要がある。
+# 旧リリースで全て 1 になっていたバグの再発防止として、ここで毎回 Unix 時刻を注入する。
+BUILD_NUMBER=$(date -u +%s)
 xcodebuild -project "$PROJECT" \
     -scheme "$SCHEME" \
     -configuration Release \
     -derivedDataPath "$BUILD_DIR/DerivedData" \
     MARKETING_VERSION="$VERSION" \
+    CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
     build | tail -3
 
 APP_PATH="$BUILD_DIR/DerivedData/Build/Products/Release/${APP_NAME}.app"
@@ -131,7 +136,7 @@ cat <<EOF
 <item>
     <title>Version ${VERSION}</title>
     <pubDate>${PUB_DATE}</pubDate>
-    <sparkle:version>${VERSION}</sparkle:version>
+    <sparkle:version>${BUILD_NUMBER}</sparkle:version>
     <sparkle:shortVersionString>${VERSION}</sparkle:shortVersionString>
     <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
     <enclosure

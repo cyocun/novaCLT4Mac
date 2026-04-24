@@ -3,6 +3,20 @@
 本ファイルに各リリースの変更点を記録する。
 バージョン番号は [Semantic Versioning](https://semver.org/) に準拠。
 
+## [0.1.7] - 2026-04-24
+
+### 修正
+- **自動アップデート判定の不具合を修正**: v0.1.1〜v0.1.6 は全て
+  `CFBundleVersion` が `1` で生成されていたため、Sparkle のバージョン
+  比較で appcast の `<sparkle:version>0.1.X</sparkle:version>` と
+  アプリ側の `1` が比較され、"1 > 0.1.X" と判定されて
+  「最新版です」と誤表示されていた。
+- `scripts/release.sh` でリリース毎に `CURRENT_PROJECT_VERSION` を
+  Unix 時刻 (単調増加) で注入するよう変更し、appcast の
+  `<sparkle:version>` にも同じ値を入れるよう修正。
+- `<sparkle:shortVersionString>` には従来どおり `0.1.X` を入れる
+  (ユーザー向けの表示はこちら)。
+
 ## [0.1.6] - 2026-04-24
 
 ### その他
